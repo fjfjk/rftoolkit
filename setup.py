@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 Setup script for RFToolkit
+Please launch before using anything else in the framework(really, it only installs basic stuff,
+gps spoof and protocols tab have their own setup options)
 """
 
 import os
@@ -47,12 +49,34 @@ def check_dependencies():
         except (subprocess.CalledProcessError, FileNotFoundError):
             print(f"[WARNING] {dep} not found (needed for GPS spoofing)")
     
+    # Check for ADS-B dependencies
+    print("Checking for ADS-B monitoring dependencies...")
+    adsb_deps = ['librtlsdr-dev', 'pkg-config']
+    for dep in adsb_deps:
+        try:
+            # Try to find the package
+            result = subprocess.run(['dpkg', '-l', dep], capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"[OK] {dep} found")
+            else:
+                print(f"[INFO] {dep} not installed (needed for ADS-B monitoring)")
+        except:
+            print(f"[INFO] {dep} status unknown")
+    
+    # Check if readsb is available
+    print("Checking for readsb...")
+    try:
+        result = subprocess.run(['which', 'readsb'], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("[OK] readsb found")
+        else:
+            print("[INFO] readsb not found (will be installed when needed)")
+    except:
+        print("[INFO] readsb status unknown")
+    
     return all_found
 
 def install_rf_toolkit():
-    """Install the RF Toolkit"""
-    print("Installing RF Toolkit...")
-    
 # mkdirs to create needed directories
     home_dir = Path.home()
     toolkit_dir = home_dir / ".rf_toolkit"
@@ -86,4 +110,6 @@ if __name__ == "__main__":
         print("\nPlease install missing dependencies first!")
         print("try: sudo apt install hackrf gcc git make cmake")
         print("For GPS spoofing also install: libxml2 libxml2-dev bison flex libcdk5-dev libaio-dev libusb-1.0-0-dev libserialport-dev libavahi-client-dev doxygen graphviz")
+        print("For ADS-B monitoring also install: librtlsdr-dev pkg-config")
+        print("Note: readsb will can be installed using a setup option in Protocols tab")
         sys.exit(1)
