@@ -7,8 +7,10 @@ import json
 from pathlib import Path
 import datetime
 import shutil
-#some stuff
-class Protocols:
+import signal
+import atexit
+
+class ADSB:
     def __init__(self):
         self.base_dir = Path.home() / ".rf_toolkit" / "protocols"
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -16,61 +18,54 @@ class Protocols:
         self.monitoring = False
         self.aircraft_data = {}
         self.last_cleanup = time.time()
-    #menu
+        # added cleanup function so readsb doesnt get stuck in  the background process if the user cannot be bothered to turn the scan off manually before exiting from the framework
+        atexit.register(self._exit_cleanup)
+    
+    def _exit_cleanup(self):
+        # the cleaner
+        if self.monitoring or self.adsb_process:
+            print("Cleaning up ADS-B monitoring on exit...")
+            self.stop_adsb()
+    
     def run(self):
-        while True:
-            os.system('clear')
-            print("========================================")
-            print("             PROTOCOLS")
-            print("========================================")
-            print("1. ADS-B Aircraft Monitoring(BETA! Untested in environments with actual planes flying)")
-            print("2. Back to Main Menu")
-            print("More stuff will be added later")
-            
-            choice = input("\nEnter choice (1-2): ").strip()
-            
-            if choice == '1':
-                self.adsb_menu()
-            elif choice == '2':
-                self.stop_adsb()
-                return
-            else:
-                print("Invalid choice!")
-                input("Press Enter to continue...")
-#another menu thingy
-    def adsb_menu(self):
-        while True:
-            os.system('clear')
-            print("========================================")
-            print("     ADS-B AIRCRAFT MONITORING(BETA)")
-            print("========================================")
-            print("1. Start ADS-B Monitoring")
-            print("2. View Current Aircraft")
-            print("3. Stop ADS-B Monitoring")
-            print("4. Install readsb (First Time)")
-            print("5. Back to Protocols Menu")
-            
-            choice = input("\nEnter choice (1-5): ").strip()
-            
-            if choice == '1':
-                self.start_adsb_monitoring()
-            elif choice == '2':
-                self.view_aircraft()
-            elif choice == '3':
-                self.stop_adsb()
-            elif choice == '4':
-                self.install_readsb()
-            elif choice == '5':
-                self.stop_adsb()
-                return
-            else:
-                print("Invalid choice!")
-                input("Press Enter to continue...")
+        try:
+            while True:
+                os.system('clear')
+                print("========================================")
+                print("     ADS-B AIRCRAFT MONITORING(BETA)")
+                print("========================================")
+                print("1. Start ADS-B Monitoring")
+                print("2. View Current Aircraft")
+                print("3. Stop ADS-B Monitoring")
+                print("4. Install readsb (First Time)")
+                print("5. Back to Protocols Menu")
+                
+                choice = input("\nEnter choice (1-5): ").strip()
+                
+                if choice == '1':
+                    self.start_adsb_monitoring()
+                elif choice == '2':
+                    self.view_aircraft()
+                elif choice == '3':
+                    self.stop_adsb()
+                elif choice == '4':
+                    self.install_readsb()
+                elif choice == '5':
+                    # Stop monitoring when going back to protocols menu
+                    self.stop_adsb()
+                    return
+                else:
+                    print("Invalid choice!")
+                    input("Press Enter to continue...")
+        except KeyboardInterrupt:
+            # Stop monitoring when ctrl+c'ed
+            print("\nStopping ADS-B monitoring and returning to Protocols menu...")
+            self.stop_adsb()
+            return
     
     def is_readsb_available(self):
-        """Check if readsb is installed and available"""
+        #Checks if readsb is installed and available
         try:
-            #check if it's in PATH
             result = subprocess.run(['which', 'readsb'], capture_output=True, text=True)
             if result.returncode == 0:
                 return True
@@ -91,7 +86,7 @@ class Protocols:
             return False
     
     def install_readsb(self):
-        """Install readsb for ADS-B decoding"""
+        #Install readsb for ADS-B decoding
         print("Installing readsb for ADS-B monitoring...")
         
         #trying to install from repos
@@ -159,8 +154,7 @@ class Protocols:
         input("Press Enter to continue...")
     
     def get_readsb_path(self):
-        """Get the path to readsb executable"""
-        #checking system packages for readsb
+        #get the path to readsb executable(if it exists)
         system_paths = [
             '/usr/bin/readsb',
             '/usr/local/bin/readsb',
@@ -175,7 +169,6 @@ class Protocols:
         if Path(local_path).exists():
             return local_path
         
-        # last resort - check if it's in PATH somehow >:/
         try:
             result = subprocess.run(['which', 'readsb'], capture_output=True, text=True)
             if result.returncode == 0:
@@ -184,9 +177,10 @@ class Protocols:
             pass
             
         return None
+    
     #finally reached the beginning of the working part itself :'(
     def start_adsb_monitoring(self):
-        """Start ADS-B monitoring with readsb"""
+        #start ADS-B monitoring
         if not self.is_readsb_available():
             print("readsb not found! Please install it first using option 4.")
             input("Press Enter to continue...")
@@ -199,7 +193,7 @@ class Protocols:
             return
         
         try:
-            # Stop any monitoring processes if they exist
+            # another stopper
             self.stop_adsb()
             
             print("Starting ADS-B monitoring with readsb...")
@@ -228,13 +222,16 @@ class Protocols:
             time.sleep(1)
             
             self.monitoring = True
+            # using preexec_fn to create a subprocess for adsb scan, so when ctrl+c'ed from the display mode the scan doesnt stop and instead run in the background
+            # good news - it worked, bad news - now i cannot stop itXD EDIT: fixed by adding a lot of cleaners
             self.adsb_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                preexec_fn=os.setsid  # This creates a new process group
             )
             
             #start a thread to process output
@@ -260,7 +257,7 @@ class Protocols:
         input("Press Enter to continue...")
     
     def _monitor_errors(self):
-        """Monitor stderr for device status messages"""
+        #monitoring the stderr for device status messages
         while self.monitoring and self.adsb_process:
             try:
                 line = self.adsb_process.stderr.readline()
@@ -378,7 +375,7 @@ class Protocols:
             pass
     
     def _cleanup_old_aircraft(self):
-        """Remove aircraft that haven't been seen recently"""
+        #remove aircrafts that haven't been seen in some time
         current_time = time.time()
         # Clean up this shit every 30 seconds
         if current_time - self.last_cleanup > 30:
@@ -386,7 +383,7 @@ class Protocols:
             for hex_code, aircraft in self.aircraft_data.items():
                 last_seen_str = aircraft.get('last_seen', '')
                 try:
-                    # Parse time in Hours:Minues:Seconds
+                    #parse time in Hours:Minues:Seconds
                     last_seen_time = datetime.datetime.strptime(last_seen_str, "%H:%M:%S")
                     now = datetime.datetime.now()
                     #create comparable datetime objects
@@ -461,45 +458,81 @@ class Protocols:
                 print("\n" + "="*60)
                 print("Press Ctrl+C to return to ADS-B menu")
                 print("Listening on 1090 MHz - Updates every 3 seconds")
+                print("Note: Monitoring continues running in background")
                 
                 #update every 3 seconds and expect user interrupt
                 try:
                     time.sleep(3)
                 except KeyboardInterrupt:
                     print("\nReturning to ADS-B menu...")
+                    print("ADS-B monitoring is still running in background!")
+                    print("Use option 3 to stop monitoring completely")
+                    time.sleep(3)  # Give the poor user time to read the message
                     break
                     
         except KeyboardInterrupt:
             print("\nReturning to ADS-B menu...")
+            print("ADS-B monitoring is still running in background!")
+            print("Use option 3 to stop monitoring completely")
+            time.sleep(2)
         except Exception as e:
             print(f"Error displaying aircraft: {e}")
             input("Press Enter to continue...")
     
     def stop_adsb(self):
-        """Stop ADS-B monitoring"""
+        #Stop the fun - only when user explicitly chooses option 3
+        if not self.monitoring and not self.adsb_process:
+            return  # Dont print anything if not running
+        
         self.monitoring = False
         
         if self.adsb_process:
             print("Stopping ADS-B monitoring...")
-            self.adsb_process.terminate()
-            
+            print("Terminating readsb process...")
+            # Use os.killpg to kill the entire process group
             try:
+                os.killpg(os.getpgid(self.adsb_process.pid), signal.SIGTERM)
                 self.adsb_process.wait(timeout=5)
-                print("ADS-B monitoring stopped successfully!")
+                print("readsb process terminated successfully!")
             except subprocess.TimeoutExpired:
-                print("Force stopping ADS-B monitoring...")
-                self.adsb_process.kill()
-                self.adsb_process.wait()
+                print("Process not responding, forcing termination...")
+                os.killpg(os.getpgid(self.adsb_process.pid), signal.SIGKILL)
+                try:
+                    self.adsb_process.wait(timeout=2)
+                    print("readsb process force-terminated!")
+                except subprocess.TimeoutExpired:
+                    print("Could not terminate readsb process!")
+            except ProcessLookupError:
+                print("Process already terminated")
+            except AttributeError:
+                # Process might not have a pid yet
+                self.adsb_process.terminate()
+                try:
+                    self.adsb_process.wait(timeout=5)
+                except:
+                    self.adsb_process.kill()
+                    self.adsb_process.wait()
             
             self.adsb_process = None
         
         # nuke any remaining readsb processes
-        subprocess.run(['pkill', '-f', 'readsb'], 
-                      stdout=subprocess.DEVNULL, 
-                      stderr=subprocess.DEVNULL)
+        print("Cleaning up any remaining readsb processes...")
+        result = subprocess.run(['pkill', '-f', 'readsb'], 
+                              stdout=subprocess.DEVNULL, 
+                              stderr=subprocess.DEVNULL)
         
+        if result.returncode == 0:
+            print("Cleaned up remaining readsb processes")
+        else:
+            print("No additional readsb processes found")
+        
+        # Clear aircraft data
         self.aircraft_data = {}
         self.last_cleanup = time.time()
+        
+        print("ADS-B monitoring stopped successfully!")
+        print("All aircraft data cleared")
+        time.sleep(1)
     
     def __del__(self):
         # additional cleanup when object is destroyed

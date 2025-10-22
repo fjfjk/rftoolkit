@@ -18,7 +18,7 @@ class RFToolkit:
     def __init__(self):
         self.clear_screen()
         self.author = "JustADood"
-        self.version = "0.3.2"
+        self.version = "0.4.2"
         self.base_dir = Path.home() / ".rf_toolkit"
         self.base_dir.mkdir(exist_ok=True)
         
@@ -38,7 +38,7 @@ class RFToolkit:
 # Edit - still sucks, needs coloring or some bullshit
     def display_menu(self):
         print(f"Author: {self.author}")
-        print(f"Version: {self.version} (Format - full_release_version.beta_features_version.features_in_development_version)")
+        print(f"Version: {self.version}")
         print("\n" + "="*50)
         print("           MAIN MENU")
         print("="*50)
@@ -99,10 +99,9 @@ class RFToolkit:
         jammer.run()
 
     def protocols_menu(self):
-        from modules.protocols import Protocols
-        protocols = Protocols()
-        protocols.run()
-
+    	from modules.protocols_hub import Protocols
+    	protocols = Protocols()
+    	protocols.run()
     def special_scripts_menu(self):
         from modules.special_scripts import SpecialScripts
         scripts = SpecialScripts()

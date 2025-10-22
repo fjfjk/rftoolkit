@@ -9,11 +9,31 @@ import os
 import sys
 import subprocess
 from pathlib import Path
+
+# Check what the fuck is the user running this on
+def platform_check():
+    #Check if we're on a supported platform
+    print("Checking platform...")
+    
+    if sys.platform == "win32":
+        print("[ERROR] Windows is not supported. Use WSL or a Linux VM.")
+        print("This framework requires direct hardware access to HackRF.")
+        return False
+    elif sys.platform == "darwin":
+        print("[ERROR] macOS is not officially supported.")
+        print("You might be able to compile everything manually, but good luck with that.")
+        return False
+    elif sys.platform == "linux":
+        print("[OK] Linux detected - supported platform")
+        return True
+    else:
+        print("[ERROR] the fuck is happening - unknown platform")
+        print(f"Detected platform: {sys.platform}")
+        return False
+
 # Checks for needed stuff:
 def check_dependencies():
-    """Check if required tools are installed"""
     required_tools = {
-        'hackrf': 'hackrf_info',
         'git': 'git',
         'make': 'make', 
         'gcc': 'gcc',
@@ -23,22 +43,57 @@ def check_dependencies():
     print("Checking dependencies...")
     all_found = True
     
+    # First check if hackrf package is installed
+    print("Checking for HackRF...")
+    hackrf_found = False
+    
+    # check if hackrf package is installed via dpkg
+    try:
+        result = subprocess.run(['dpkg', '-l', 'hackrf'], capture_output=True, text=True)
+        if result.returncode == 0 and 'hackrf' in result.stdout:
+            print("[OK] hackrf package installed")
+            hackrf_found = True
+        else:
+            print("[INFO] hackrf package not found in dpkg")
+    except:
+        print("[INFO] Could not check dpkg for hackrf")
+    
+    #second hackrf check in PATH
+    if not hackrf_found:
+        try:
+            result = subprocess.run(['which', 'hackrf_info'], capture_output=True, text=True)
+            if result.returncode == 0:
+                print("[OK] hackrf tools found in PATH")
+                hackrf_found = True
+        except:
+            pass
+    
+    # third check by trying to run hackrf_info
+    if not hackrf_found:
+        try:
+            result = subprocess.run(['hackrf_info', '--version'], capture_output=True, text=True)
+            if result.returncode == 0:
+                print("[OK] hackrf_info works")
+                hackrf_found = True
+        except:
+            pass
+    
+    if not hackrf_found:
+        print("[ERROR] HackRF not found! This is required for the framework.")
+        print("Install it with: sudo apt install hackrf")
+        all_found = False
+    else:
+        print("[OK] HackRF detected")
+    
+    # checking for other deps
     for tool_name, tool_cmd in required_tools.items():
         try:
-            if tool_name == 'hackrf':
-                result = subprocess.run([tool_cmd, '--version'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    print("[OK] hackrf found")
-                else:
-                    print("[ERROR] hackrf not found or not working")
-                    all_found = False
-            else:
-                subprocess.run([tool_cmd, '--version'], capture_output=True, check=True)
-                print(f"[OK] {tool_name} found")
+            subprocess.run([tool_cmd, '--version'], capture_output=True, check=True)
+            print(f"[OK] {tool_name} found")
         except (subprocess.CalledProcessError, FileNotFoundError):
             print(f"[ERROR] {tool_name} not found")
             all_found = False
-    
+
 # Check for GPS spoofer shit
     print("Checking for GPS simulator dependencies...")
     gps_deps = ['bison', 'flex', 'doxygen']
@@ -99,6 +154,12 @@ def install_rf_toolkit():
 if __name__ == "__main__":
     print("RF Toolkit Setup")
     print("================")
+    
+    # First check if we're on a supported platform
+    if not platform_check():
+        print("\nUnsupported platform detected!")
+        sys.exit(1)
+    
 # spoonfeed user with what stuff is missing    
     if check_dependencies():
         if install_rf_toolkit():
