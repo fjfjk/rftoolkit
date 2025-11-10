@@ -14,14 +14,17 @@ class Protocols:
             print("             PROTOCOLS")
             print("========================================")
             print("1. ADS-B Aircraft Monitoring(BETA! Untested in environments with actual planes flying)")
-            print("2. Back to Main Menu")
+            print("2. DSD - Digital Speech Decoder")  # NEW OPTION - WOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO yeah
+            print("3. Back to Main Menu")
             print("More stuff will be added later")
             
-            choice = input("\nEnter choice (1-2): ").strip()
+            choice = input("\nEnter choice (1-3): ").strip()  # Updated to 3
             
             if choice == '1':
                 self.adsb_menu()
-            elif choice == '2':
+            elif choice == '2':  # NEW - DSD
+                self.dsd_menu()
+            elif choice == '3':  # Updated from 2 to 3
                 return
             else:
                 print("Invalid choice!")
@@ -33,3 +36,10 @@ class Protocols:
         from .protocols.adsb import ADSB
         adsb = ADSB()
         adsb.run()
+
+    # digital speech decoder
+    def dsd_menu(self):
+        """DSD - Digital Speech Decoder for digital voice protocols"""
+        from .protocols.dsd import DSD
+        dsd = DSD()
+        dsd.run()

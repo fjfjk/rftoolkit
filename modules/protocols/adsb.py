@@ -9,6 +9,7 @@ import datetime
 import shutil
 import signal
 import atexit
+import io # Import io for text wrapping
 
 class ADSB:
     def __init__(self):
@@ -18,7 +19,13 @@ class ADSB:
         self.monitoring = False
         self.aircraft_data = {}
         self.last_cleanup = time.time()
-        # added cleanup function so readsb doesnt get stuck in  the background process if the user cannot be bothered to turn the scan off manually before exiting from the framework
+        
+        # New: added ebug mode flag, replaces the data table with raw data output
+        self.debug_mode = False 
+        self.raw_output_buffer = [] 
+        self.raw_output_lock = threading.Lock()
+        
+        # added cleanup function so readsb doesnt get stuck in the background process if the user cannot be bothered to turn the scan off manually before exiting from the framework
         atexit.register(self._exit_cleanup)
     
     def _exit_cleanup(self):
@@ -34,13 +41,20 @@ class ADSB:
                 print("========================================")
                 print("     ADS-B AIRCRAFT MONITORING(BETA)")
                 print("========================================")
+                
+                #display current Debug Mode status (no color)
+                debug_status = "ON (Raw Data)" if self.debug_mode else "OFF (Table View)"
+                print(f"Debug Mode: {debug_status}")
+                print("----------------------------------------")
+                
                 print("1. Start ADS-B Monitoring")
                 print("2. View Current Aircraft")
                 print("3. Stop ADS-B Monitoring")
                 print("4. Install readsb (First Time)")
-                print("5. Back to Protocols Menu")
+                print("5. Toggle Debug Mode") # New menu option
+                print("6. Back to Protocols Menu") # Updated menu option
                 
-                choice = input("\nEnter choice (1-5): ").strip()
+                choice = input("\nEnter choice (1-6): ").strip()
                 
                 if choice == '1':
                     self.start_adsb_monitoring()
@@ -51,6 +65,10 @@ class ADSB:
                 elif choice == '4':
                     self.install_readsb()
                 elif choice == '5':
+                    self.debug_mode = not self.debug_mode
+                    print(f"Debug Mode set to {'ON' if self.debug_mode else 'OFF'}.")
+                    input("Press Enter to continue...")
+                elif choice == '6':
                     # Stop monitoring when going back to protocols menu
                     self.stop_adsb()
                     return
@@ -93,11 +111,12 @@ class ADSB:
         print("Checking repositories...")
         try:
             #updating package list
-            subprocess.run(['apt', 'update'], capture_output=True, check=True)
+            # Use subprocess.run with check=True to handle errors
+            subprocess.run(['sudo', 'apt', 'update'], capture_output=True, check=True)
             
             #trying to install readsb
             print("Attempting to install readsb...")
-            install_cmd = ['apt', 'install', '-y', 'readsb']
+            install_cmd = ['sudo', 'apt', 'install', '-y', 'readsb']
             result = subprocess.run(install_cmd, capture_output=True, text=True)
             
             if result.returncode == 0:
@@ -204,6 +223,7 @@ class ADSB:
             
             #command for readsb
             #EDIT: NOW with correct parameters
+            #EDIT: thet were NOT in fact, correct parameters, fixed with the addition of debug mode
             cmd = [
                 readsb_path,
                 '--device-type', 'hackrf',
@@ -236,14 +256,16 @@ class ADSB:
             
             #start a thread to process output
             self.aircraft_data = {}
-            monitor_thread = threading.Thread(target=self._process_adsb_output)
-            monitor_thread.daemon = True
+            # Clear raw output buffer on new start
+            with self.raw_output_lock:
+                self.raw_output_buffer = [] 
+
+            monitor_thread = threading.Thread(target=self._process_adsb_output, daemon=True)
             monitor_thread.start()
             
             #start another thread to monitor stderr for device status
             #NOTE: god im so fucking confused, what am i doing rn????
-            error_thread = threading.Thread(target=self._monitor_errors)
-            error_thread.daemon = True
+            error_thread = threading.Thread(target=self._monitor_errors, daemon=True)
             error_thread.start()
             
             print("ADS-B monitoring started successfully!")
@@ -258,47 +280,81 @@ class ADSB:
     
     def _monitor_errors(self):
         #monitoring the stderr for device status messages
-        while self.monitoring and self.adsb_process:
+        # This thread now reads all stderr output for logging, but only prints real errors
+        
+        if not self.adsb_process:
+            return
+
+        # Use io.TextIOWrapper to read line by line reliably
+        stderr_stream = io.TextIOWrapper(self.adsb_process.stderr, encoding='utf-8', errors='ignore')
+
+        while self.monitoring:
             try:
-                line = self.adsb_process.stderr.readline()
+                line = stderr_stream.readline()
                 if not line:
                     break
                 
-                #print any error messages if anything shitted itself in the process
-                if line.strip():
-                    print(f"readsb: {line.strip()}")
+                line_str = line.strip()
+                if not line_str:
+                    continue
+
+                # Add ALL stderr lines to the raw buffer for debug mode
+                with self.raw_output_lock:
+                    self.raw_output_buffer.append(f"[STDERR] {line_str}")
+
+                # Only print to console if it looks like a real error
+                if any(err in line_str.lower() for err in ['fail', 'fatal', 'error', 'cannot open']):
+                    print(f"readsb ERROR: {line_str}")
                     
             except Exception as e:
+                # This can happen if the process is killed and the pipe closes
                 break
     
     def _process_adsb_output(self):
-        #process readsb interactive output in a separate thread(this is why we cant have nice things... except this framework:D)
+        #process readsb interactive output in a separate thread(this is why we cant have nice things... (except this framework:D)
+        
+        if not self.adsb_process:
+            return
+
+        # Use io.TextIOWrapper to read line by line reliably
+        stdout_stream = io.TextIOWrapper(self.adsb_process.stdout, encoding='utf-8', errors='ignore')
+
         aircraft_section = False
         header_lines = 0
         
-        while self.monitoring and self.adsb_process:
+        while self.monitoring:
             try:
-                line = self.adsb_process.stdout.readline()
+                line = stdout_stream.readline()
                 if not line:
                     break
                 
-                line = line.strip()
+                line_str = line.strip()
+                if not line_str:
+                    continue
                 
+                #store all stdout output in the raw buffer for debug mode
+                with self.raw_output_lock:
+                    self.raw_output_buffer.append(f"[STDOUT] {line_str}")
+
+                #if debug mode is ON, we only store the raw data and skip parsing
+                if self.debug_mode:
+                    continue
+
                 #reset state when we see the header
-                if line.startswith('Hex'):
+                if line_str.startswith('Hex'):
                     aircraft_section = True
                     header_lines = 0
                     continue
                 
                 #skip separator lines shitted out by the thingy
-                if line.startswith('---'):
+                if line_str.startswith('---'):
                     header_lines += 1
                     continue
                 
                 # FINALLY, we're in the aircraft data section after the header
                 if aircraft_section and header_lines >= 1:
                     # Parse aircraft data line
-                    self._parse_aircraft_line(line)
+                    self._parse_aircraft_line(line_str)
                     
             except Exception as e:
                 # Continue processing even if one line fails SOMEHOW
@@ -398,12 +454,13 @@ class ADSB:
                     expired_hexes.append(hex_code)
             
             for hex_code in expired_hexes:
-                del self.aircraft_data[hex_code]
+                if hex_code in self.aircraft_data:
+                    del self.aircraft_data[hex_code]
             
             self.last_cleanup = current_time
     
     def view_aircraft(self):
-        #Displays current aircraft in a structured format(so pretty yet so ugly...)
+        #Displays current aircraft in a structured format(so pretty yet so ugly...) or raw output
         if not self.monitoring or not self.adsb_process:
             print("ADS-B monitoring is not running!")
             print("Start monitoring first using option 1.")
@@ -412,48 +469,66 @@ class ADSB:
         
         try:
             while True:
-                #look at this beauty
                 os.system('clear')
                 print("========================================")
-                print("        CURRENT AIRCRAFT - ADS-B")
+                print("         CURRENT AIRCRAFT - ADS-B")
                 print("========================================")
                 print(f"Last update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                
-                # Clean up old aircraft before displaying
-                self._cleanup_old_aircraft()
-                
-                print(f"Aircraft detected: {len(self.aircraft_data)}")
+                print(f"Mode: {'RAW DATA (DEBUG)' if self.debug_mode else 'STRUCTURED TABLE'}")
                 print("="*60)
-                
-                if not self.aircraft_data:
-                    print("No aircraft currently in range...")
-                    print("")
-                    print("Check RX LED on your hackrf, also make sure that your antenna supports the 1090 MHz frequency")
+
+                if self.debug_mode:
+                    # Debug Mode: Display raw output from the buffer
+                    print("--- RAW READSB OUTPUT (Latest 100 lines) ---")
+                    
+                    with self.raw_output_lock:
+                        # Display up to the last 100 lines
+                        for line in self.raw_output_buffer[-100:]:
+                            print(line)
+                        # Clear buffer regularly to prevent memory overload
+                        if len(self.raw_output_buffer) > 200: # Keep a buffer of 200, show 100
+                            self.raw_output_buffer = self.raw_output_buffer[-100:] 
+                    
+                    if not self.raw_output_buffer:
+                        print("No raw data received yet. Waiting for readsb output...")
+                    
                 else:
-                    # LIKE IT, i spent too much time making this somewhat nice looking D:
-                    print(f"{'Callsign':<9} {'Alt':<8} {'Speed':<8} {'Heading':<9} {'Last Seen':<9}")
-                    print("-" * 60)
+                    #normal mode - a table-ish structure
+                    # Clean up old aircraft before displaying
+                    self._cleanup_old_aircraft()
                     
-                    # Sort aircraft by last seen (newest first)
-                    sorted_aircraft = sorted(self.aircraft_data.values(), 
-                                           key=lambda x: x.get('last_seen', ''), 
-                                           reverse=True)
+                    print(f"Aircraft detected: {len(self.aircraft_data)}")
+                    print("="*60)
                     
-                    for aircraft in sorted_aircraft[:30]:  # Show max 30 aircraft
-                        callsign = aircraft.get('flight', aircraft.get('hex', 'N/A'))
-                        altitude = aircraft.get('altitude', '---')
-                        speed = aircraft.get('speed', '---')
-                        heading = aircraft.get('heading', '---')
-                        last_seen = aircraft.get('last_seen', '---')
+                    if not self.aircraft_data:
+                        print("No aircraft currently in range...")
+                        print("")
+                        print("Check RX LED on your hackrf, also make sure that your antenna supports the 1090 MHz frequency")
+                    else:
+                        # LIKE IT, i spent too much time making this somewhat nice looking D:
+                        print(f"{'Callsign':<10} {'Alt':<9} {'Speed':<8} {'Heading':<9} {'Last Seen':<9}")
+                        print("-" * 60)
                         
-                        # Give the callsign israel men treatment if too long
-                        if len(callsign) > 10:
-                            callsign = callsign[:10]
+                        # Sort aircraft by last seen (newest first)
+                        sorted_aircraft = sorted(self.aircraft_data.values(), 
+                                               key=lambda x: x.get('last_seen', ''), 
+                                               reverse=True)
                         
-                        print(f"{callsign:<9} {altitude:<8} {speed:<8} {heading:<9} {last_seen:<9}")
-                    
-                    if len(self.aircraft_data) > 30:
-                        print(f"... and {len(self.aircraft_data) - 30} more aircraft")
+                        for aircraft in sorted_aircraft[:30]:  # Show max 30 aircraft
+                            callsign = aircraft.get('flight', aircraft.get('hex', 'N/A'))
+                            altitude = aircraft.get('altitude', '---')
+                            speed = aircraft.get('speed', '---')
+                            heading = aircraft.get('heading', '---')
+                            last_seen = aircraft.get('last_seen', '---')
+                            
+                            # Give the callsign israel men treatment if too long
+                            if len(callsign) > 10:
+                                callsign = callsign[:10]
+                            
+                            print(f"{callsign:<10} {altitude:<9} {speed:<8} {heading:<9} {last_seen:<9}")
+                        
+                        if len(self.aircraft_data) > 30:
+                            print(f"... and {len(self.aircraft_data) - 30} more aircraft")
                 
                 print("\n" + "="*60)
                 print("Press Ctrl+C to return to ADS-B menu")
@@ -518,16 +593,18 @@ class ADSB:
         # nuke any remaining readsb processes
         print("Cleaning up any remaining readsb processes...")
         result = subprocess.run(['pkill', '-f', 'readsb'], 
-                              stdout=subprocess.DEVNULL, 
-                              stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.DEVNULL, 
+                                 stderr=subprocess.DEVNULL)
         
         if result.returncode == 0:
             print("Cleaned up remaining readsb processes")
         else:
             print("No additional readsb processes found")
         
-        # Clear aircraft data
+        # Clear aircraft data and raw buffer
         self.aircraft_data = {}
+        with self.raw_output_lock:
+            self.raw_output_buffer = [] 
         self.last_cleanup = time.time()
         
         print("ADS-B monitoring stopped successfully!")

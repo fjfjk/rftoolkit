@@ -18,7 +18,7 @@ class RFToolkit:
     def __init__(self):
         self.clear_screen()
         self.author = "JustADood"
-        self.version = "0.4.2"
+        self.version = "0.5.1"
         self.base_dir = Path.home() / ".rf_toolkit"
         self.base_dir.mkdir(exist_ok=True)
         
@@ -65,11 +65,11 @@ class RFToolkit:
                     self.gps_spoof_menu()
                 elif choice == '3':
                     self.rf_jamming_menu()
-                elif choice == '4':  # NEW - Protocols
+                elif choice == '4':
                     self.protocols_menu()
-                elif choice == '5':  # Updated from 4 to 5 (bc still not done, lol)
+                elif choice == '5':
                     self.special_scripts_menu()
-                elif choice == '6':  # Updated from 5 to 6
+                elif choice == '6':
                     print("\nThank you for using RFToolkit!")
                     sys.exit(0)
                 else:
@@ -99,9 +99,10 @@ class RFToolkit:
         jammer.run()
 
     def protocols_menu(self):
-    	from modules.protocols_hub import Protocols
-    	protocols = Protocols()
-    	protocols.run()
+        from modules.protocols_hub import Protocols
+        protocols = Protocols()
+        protocols.run()
+
     def special_scripts_menu(self):
         from modules.special_scripts import SpecialScripts
         scripts = SpecialScripts()
