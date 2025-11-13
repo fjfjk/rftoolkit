@@ -18,7 +18,7 @@ class RFToolkit:
     def __init__(self):
         self.clear_screen()
         self.author = "JustADood"
-        self.version = "0.5.1"
+        self.version = "0.6.1"
         self.base_dir = Path.home() / ".rf_toolkit"
         self.base_dir.mkdir(exist_ok=True)
         
