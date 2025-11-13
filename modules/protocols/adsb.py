@@ -1,60 +1,96 @@
-#holy shit thats a lot of imports, and at the time im doing this i have zero fucking idea what some of them do, lol
+#NOTE: i am re-writing this shit, because nothing fucken worked, and now i am kinda here, so:
 import os
 import subprocess
 import threading
 import time
-import json
-from pathlib import Path
 import datetime
 import shutil
 import signal
 import atexit
-import io # Import io for text wrapping
+import json
+import re
+from pathlib import Path
+from queue import Queue, Empty
 
 class ADSB:
+    #configuration and application state
     def __init__(self):
+        #setup the base directories for configs and output... and stuff, iunno
         self.base_dir = Path.home() / ".rf_toolkit" / "protocols"
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path = self.base_dir / "adsb_config.json"
+        
+        #config init + load
+        self._set_default_config()
+        self._load_config()
+        
+        #vars for stuff
         self.adsb_process = None
         self.monitoring = False
         self.aircraft_data = {}
         self.last_cleanup = time.time()
         
-        # New: added ebug mode flag, replaces the data table with raw data output
-        self.debug_mode = False 
-        self.raw_output_buffer = [] 
-        self.raw_output_lock = threading.Lock()
+        self.debug_mode = False
+        self.raw_output_queue = Queue()     #queue to handle output transfer
+        self.raw_output_buffer = []         #ngl, no idea what this is, figure it out yourself
+        self.has_received_data = False      #confirm that the fucker is actually outputting data
         
-        # added cleanup function so readsb doesnt get stuck in the background process if the user cannot be bothered to turn the scan off manually before exiting from the framework
+        #cleanup function
         atexit.register(self._exit_cleanup)
     
+    #defaults for the command
+    def _set_default_config(self):
+        self.config = {
+            "gain": 20,                  #gain in dB (0 to 48)(the bigger the number, the higher the sensitivity, but the noise is also louder)
+            "freq": 1090000000,          #ads-b frequency (1090 MHz), idk who will want to edit that, but oh well
+            "lat": 0.0,                  #our latitude for CPR
+            "lon": 0.0,                  #and our longitude for CPR
+            "stats_every": 10            #how often does readsb prints statistics
+        }
+
+    # Saves the current configuration to a jason's son
+    def _save_config(self):
+        try:
+            with self.config_path.open('w') as f:
+                json.dump(self.config, f, indent=4)
+        except Exception:
+            pass
+
+    #loadd configuration from a file or save defaults if none exists
+    def _load_config(self):
+        try:
+            with self.config_path.open('r') as f:
+                loaded_config = json.load(f)
+                self.config.update(loaded_config)
+        except Exception:
+            self._save_config()
+            
+    #nuke subprocesses after exiting the script if some were left alive
     def _exit_cleanup(self):
-        # the cleaner
         if self.monitoring or self.adsb_process:
-            print("Cleaning up ADS-B monitoring on exit...")
             self.stop_adsb()
     
+    #main menu
     def run(self):
         try:
             while True:
                 os.system('clear')
                 print("========================================")
-                print("     ADS-B AIRCRAFT MONITORING(BETA)")
+                print("     ADS-B AIRCRAFT MONITORING")
                 print("========================================")
                 
-                #display current Debug Mode status (no color)
-                debug_status = "ON (Raw Data)" if self.debug_mode else "OFF (Table View)"
+                debug_status = "ON(raw data)" if self.debug_mode else "OFF"
                 print(f"Debug Mode: {debug_status}")
                 print("----------------------------------------")
-                
                 print("1. Start ADS-B Monitoring")
-                print("2. View Current Aircraft")
+                print("2. View Current Aircraft Output")
                 print("3. Stop ADS-B Monitoring")
-                print("4. Install readsb (First Time)")
-                print("5. Toggle Debug Mode") # New menu option
-                print("6. Back to Protocols Menu") # Updated menu option
+                print("4. Install readsb")
+                print("5. Configure HackRF Settings")
+                print("6. Toggle Debug Mode")
+                print("7. Back to Protocols Menu")
                 
-                choice = input("\nEnter choice (1-6): ").strip()
+                choice = input("\nEnter choice (1-7): ").strip()
                 
                 if choice == '1':
                     self.start_adsb_monitoring()
@@ -65,125 +101,76 @@ class ADSB:
                 elif choice == '4':
                     self.install_readsb()
                 elif choice == '5':
+                    self.configure_settings()
+                elif choice == '6':
                     self.debug_mode = not self.debug_mode
                     print(f"Debug Mode set to {'ON' if self.debug_mode else 'OFF'}.")
                     input("Press Enter to continue...")
-                elif choice == '6':
-                    # Stop monitoring when going back to protocols menu
+                elif choice == '7':
                     self.stop_adsb()
                     return
                 else:
                     print("Invalid choice!")
                     input("Press Enter to continue...")
         except KeyboardInterrupt:
-            # Stop monitoring when ctrl+c'ed
-            print("\nStopping ADS-B monitoring and returning to Protocols menu...")
             self.stop_adsb()
             return
     
+    # Checks if the readsb exists
     def is_readsb_available(self):
-        #Checks if readsb is installed and available
         try:
-            result = subprocess.run(['which', 'readsb'], capture_output=True, text=True)
-            if result.returncode == 0:
+            # Check system path
+            if subprocess.run(['which', 'readsb'], capture_output=True, text=True).returncode == 0:
                 return True
             
-            #check common locations
-            common_paths = [
-                '/usr/bin/readsb',
-                '/usr/local/bin/readsb',
-                str(self.base_dir / 'readsb' / 'readsb'),
-            ]
-            
-            for path in common_paths:
-                if Path(path).exists():
-                    return True
+            # Check local build path
+            if (self.base_dir / 'readsb' / 'readsb').exists():
+                return True
                     
             return False
         except:
             return False
     
+    #install the readsb via apt or source
     def install_readsb(self):
-        #Install readsb for ADS-B decoding
-        print("Installing readsb for ADS-B monitoring...")
+        print("Installing readsb...")
         
-        #trying to install from repos
-        print("Checking repositories...")
         try:
-            #updating package list
-            # Use subprocess.run with check=True to handle errors
-            subprocess.run(['sudo', 'apt', 'update'], capture_output=True, check=True)
-            
-            #trying to install readsb
-            print("Attempting to install readsb...")
+            subprocess.run(['sudo', 'apt', 'update'], check=True, capture_output=True)
             install_cmd = ['sudo', 'apt', 'install', '-y', 'readsb']
-            result = subprocess.run(install_cmd, capture_output=True, text=True)
+            subprocess.run(install_cmd, check=True, capture_output=True, text=True)
             
-            if result.returncode == 0:
-                print("Successfully installed readsb!")
-                print("readsb is now available system-wide")
-                return
-            else:
-                print("Could not install readsb, shit has happened:/")
-
-        except subprocess.CalledProcessError as e:
-            print(f"Repository installation failed: {e}")
+            print("Successfully installed readsb from repositories!")
+            return
+        except subprocess.CalledProcessError:
+            print("System package installation failed. Proceeding to source build...")
         except Exception as e:
-            print(f"Error during repository installation: {e}")
-        
-        #if repository installation fails, build from source
-        print("Step 2: Building readsb from source...")
+            print(f"Error during repository check: {e}")
+
         try:
             readsb_dir = self.base_dir / "readsb"
-            
-            # remove existing directory if it exists
             if readsb_dir.exists():
                 shutil.rmtree(readsb_dir)
             
             print("Cloning readsb repository...")
-            clone_cmd = [
-                'git', 'clone', 'https://github.com/wiedehopf/readsb.git',
-                str(readsb_dir)
-            ]
-            subprocess.run(clone_cmd, check=True)
+            subprocess.run(['git', 'clone', 'https://github.com/wiedehopf/readsb.git', str(readsb_dir)], check=True)
             
-            print("Building readsb with HackRF support...")
+            print("Building readsb...")
+            # Use RTLSDR=yes build option, cause shit may happen otherwise
             build_cmd = ['make', 'RTLSDR=yes']
-            result = subprocess.run(build_cmd, cwd=readsb_dir, capture_output=True, text=True)
+            subprocess.run(build_cmd, cwd=readsb_dir, check=True, capture_output=True, text=True)
             
-            if result.returncode == 0:
-                print("readsb built successfully!")
-                bin_path = readsb_dir / "readsb"
-                if bin_path.exists():
-                    print(f"Executable location: {bin_path}")
-                    print("Note: This is a local build. For system-wide installation, run:")
-                    print(f"sudo cp {bin_path} /usr/local/bin/")
-            else:
-                print("readsb build failed!")
-                print(f"Build errors: {result.stderr}")
-                print("\nYou may need to install build dependencies:")
-                print("sudo apt install build-essential librtlsdr-dev pkg-config libusb-1.0-0-dev")
-                #god fucking damn it im so tired of making error handling D:
+            print("readsb built successfully locally!")
+        except subprocess.CalledProcessError as e:
+            print("readsb source build failed.")
+            print(f"Errors:\n{e.stderr}")
         except Exception as e:
             print(f"Source build failed: {e}")
-            print("\nAll installation methods failed.")
-            print("Please install readsb manually:")
-            print("sudo apt update && sudo apt install readsb")
-        
+            
         input("Press Enter to continue...")
     
+    # Returns the full path to the readsb executable
     def get_readsb_path(self):
-        #get the path to readsb executable(if it exists)
-        system_paths = [
-            '/usr/bin/readsb',
-            '/usr/local/bin/readsb',
-        ]
-        
-        for path in system_paths:
-            if Path(path).exists():
-                return path
-        
-        # check the new local build
         local_path = str(self.base_dir / 'readsb' / 'readsb')
         if Path(local_path).exists():
             return local_path
@@ -196,10 +183,48 @@ class ADSB:
             pass
             
         return None
+        
+    # change config
+    def configure_settings(self):
+        os.system('clear')
+        print("========================================")
+        print("      CONFIGURE ADS-B SETTINGS")
+        print("========================================")
+        print(f"Current HackRF Gain (dB): {self.config['gain']}")
+        print(f"Current Frequency (hz): {self.config['freq']}")
+        print(f"Current Latitude: {self.config['lat']}")
+        print(f"Current Longitude: {self.config['lon']}")
+        print("----------------------------------------")
+
+        try:
+            gain = input(f"Enter HackRF Gain (dB, e.g., 0-48) [Current: {self.config['gain']}]: ")
+            if gain:
+                self.config['gain'] = int(gain)
+
+            freq = input(f"Enter Frequency (hz, default 1090000000) [Current: {self.config['freq']}]: ")
+            if freq:
+                self.config['freq'] = int(freq)
+
+            lat = input(f"Enter Receiver Latitude (e.g., 34.05) [Current: {self.config['lat']}]: ")
+            if lat:
+                self.config['lat'] = float(lat)
+
+            lon = input(f"Enter Receiver Longitude (e.g., -118.24) [Current: {self.config['lon']}]: ")
+            if lon:
+                self.config['lon'] = float(lon)
+
+            self._save_config()
+            print("\nSettings saved successfully.")
+
+        except ValueError:
+            print("\nInvalid input. Settings not saved. Please enter numeric values.") #fuck this word is weird
+        except Exception as e:
+            print(f"\nAn error occurred: {e}")
+
+        input("Press Enter to continue...")
     
-    #finally reached the beginning of the working part itself :'(
+    #start readsb subprocess
     def start_adsb_monitoring(self):
-        #start ADS-B monitoring
         if not self.is_readsb_available():
             print("readsb not found! Please install it first using option 4.")
             input("Press Enter to continue...")
@@ -212,38 +237,29 @@ class ADSB:
             return
         
         try:
-            # another stopper
             self.stop_adsb()
             
-            print("Starting ADS-B monitoring with readsb...")
-            print("Listening on 1090 MHz for aircraft transmissions")
-            print("Using HackRF One as SDR device")
-            print("HackRF RX LED should light up when monitoring starts")
-            print("Press Ctrl+C in the aircraft view to stop monitoring")
+            print("Starting ADS-B monitoring...")
             
-            #command for readsb
-            #EDIT: NOW with correct parameters
-            #EDIT: thet were NOT in fact, correct parameters, fixed with the addition of debug mode
+            #readsb launch command.... NOW with correct parameters(trust) NOTE: if you dont know - this is a 4-th iteration bc shit didnt want to work
             cmd = [
                 readsb_path,
                 '--device-type', 'hackrf',
-                '--gain', '20', #whoever didnt add shortages for keys is a fucking menace to society and needs to be shot >:( (joke(mb not))
-                '--freq', '1090000000',
-                '--net',
-                '--net-json-port', '30005', # jesus christ, nice job, bruh
-                '--stats-every', '10',
-                '--lat', '0',
-                '--lon', '0',
-                '--interactive' # look at this fucking key
+                '--gain', str(self.config['gain']),
+                '--freq', str(self.config['freq']),
+                '--lat', str(self.config['lat']),
+                '--lon', str(self.config['lon']),
+                '--stats-every', str(self.config['stats_every']),
             ]
             
-            print(f"Running: {' '.join(cmd)}")
-            print("Starting...")
-            time.sleep(1)
+            print(f"Running command: {' '.join(cmd)}")
             
             self.monitoring = True
-            # using preexec_fn to create a subprocess for adsb scan, so when ctrl+c'ed from the display mode the scan doesnt stop and instead run in the background
-            # good news - it worked, bad news - now i cannot stop itXD EDIT: fixed by adding a lot of cleaners
+            self.aircraft_data = {}
+            self.raw_output_buffer = []
+            self.has_received_data = False
+            
+            #subprocess that captures stdout and stderr
             self.adsb_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -251,219 +267,167 @@ class ADSB:
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                preexec_fn=os.setsid  # This creates a new process group
+                preexec_fn=os.setsid #process group for easy shutdown
             )
             
-            #start a thread to process output
-            self.aircraft_data = {}
-            # Clear raw output buffer on new start
-            with self.raw_output_lock:
-                self.raw_output_buffer = [] 
-
-            monitor_thread = threading.Thread(target=self._process_adsb_output, daemon=True)
-            monitor_thread.start()
+            #threads to read subprocess output(not united bc stuff kept breaking)
+            threading.Thread(target=self._enqueue_output, daemon=True).start()
+            threading.Thread(target=self._process_data, daemon=True).start()
             
-            #start another thread to monitor stderr for device status
-            #NOTE: god im so fucking confused, what am i doing rn????
-            error_thread = threading.Thread(target=self._monitor_errors, daemon=True)
-            error_thread.start()
-            
-            print("ADS-B monitoring started successfully!")
-            print("Switch to 'View Current Aircraft' to see detected planes")
-            time.sleep(1)
+            print("ADS-B monitoring process initiated. Data will be available shortly.")
+            time.sleep(2)
             
         except Exception as e:
-            print(f"Error starting ADS-B monitoring: {e}")
+            print(f"\n[!] Error starting ADS-B monitoring: {e}")
+
+            #try to show stderr output if the process started partially
+            if self.adsb_process and self.adsb_process.stderr:
+                try:
+                    #read any stderr output
+                    err_output = self.adsb_process.stderr.read().strip()
+                    if err_output:
+                        print("\n--- readsb stderr output ---")
+                        print(err_output)
+                        print("--- end of stderr ---\n")
+                except Exception as err_read:
+                    print(f"(Could not read stderr: {err_read})")
+
+            #check for if readsb binary exists
+            readsb_path_test = self.get_readsb_path()
+            if not readsb_path_test or not os.access(readsb_path_test, os.X_OK):
+                print(f"readsb not found or not executable at: {readsb_path_test or 'None'}")
+                print("\nTry reinstalling via menu option 4 (Install readsb).")
+
+            print("Monitoring not started.")
             self.monitoring = False
         
         input("Press Enter to continue...")
+
+
     
-    def _monitor_errors(self):
-        #monitoring the stderr for device status messages
-        # This thread now reads all stderr output for logging, but only prints real errors
-        
-        if not self.adsb_process:
-            return
+    #thread function to read from subprocess pipe and put the lines into a queue
+    def _enqueue_output(self):
+        def read_pipe(pipe, source):
+            while self.monitoring:
+                try:
+                    line = pipe.readline()
+                    if line:
+                        self.raw_output_queue.put(line)
+                    else:
+                        #check if shit has happened
+                        if self.adsb_process.poll() is not None:
+                            break
+                        time.sleep(0.1)
+                except Exception:
+                    break
 
-        # Use io.TextIOWrapper to read line by line reliably
-        stderr_stream = io.TextIOWrapper(self.adsb_process.stderr, encoding='utf-8', errors='ignore')
+        if self.adsb_process and self.adsb_process.stdout:
+            threading.Thread(target=read_pipe, args=(self.adsb_process.stdout, 'stdout'), daemon=True).start()
+        if self.adsb_process and self.adsb_process.stderr:
+            threading.Thread(target=read_pipe, args=(self.adsb_process.stderr, 'stderr'), daemon=True).start()
 
+    #process the queue data
+    def _process_data(self):
         while self.monitoring:
             try:
-                line = stderr_stream.readline()
-                if not line:
-                    break
-                
+                #read from queue EDIT: now without blocking
+                line = self.raw_output_queue.get_nowait()
                 line_str = line.strip()
-                if not line_str:
-                    continue
-
-                # Add ALL stderr lines to the raw buffer for debug mode
-                with self.raw_output_lock:
-                    self.raw_output_buffer.append(f"[STDERR] {line_str}")
-
-                # Only print to console if it looks like a real error
-                if any(err in line_str.lower() for err in ['fail', 'fatal', 'error', 'cannot open']):
-                    print(f"readsb ERROR: {line_str}")
-                    
-            except Exception as e:
-                # This can happen if the process is killed and the pipe closes
-                break
-    
-    def _process_adsb_output(self):
-        #process readsb interactive output in a separate thread(this is why we cant have nice things... (except this framework:D)
-        
-        if not self.adsb_process:
-            return
-
-        # Use io.TextIOWrapper to read line by line reliably
-        stdout_stream = io.TextIOWrapper(self.adsb_process.stdout, encoding='utf-8', errors='ignore')
-
-        aircraft_section = False
-        header_lines = 0
-        
-        while self.monitoring:
-            try:
-                line = stdout_stream.readline()
-                if not line:
-                    break
                 
-                line_str = line.strip()
                 if not line_str:
                     continue
                 
-                #store all stdout output in the raw buffer for debug mode
-                with self.raw_output_lock:
-                    self.raw_output_buffer.append(f"[STDOUT] {line_str}")
+                # Set data received flag if any non-empty line is seen
+                if not self.has_received_data and len(line_str) > 5:
+                    self.has_received_data = True
 
-                #if debug mode is ON, we only store the raw data and skip parsing
-                if self.debug_mode:
-                    continue
+                #raw output buffer for debug view
+                self.raw_output_buffer.append(line_str)
+                
+                # keep buffer manageable
+                if len(self.raw_output_buffer) > 200: 
+                    self.raw_output_buffer = self.raw_output_buffer[-100:]
 
-                #reset state when we see the header
-                if line_str.startswith('Hex'):
-                    aircraft_section = True
-                    header_lines = 0
-                    continue
+                #raw Mode-S message parsing for table view (only when debug is off) NOTE: more stuff needs to be added, but this will do for now
+                if not self.debug_mode and line_str.startswith('*') and line_str.endswith(';'):
+                    self._parse_raw_line(line_str)
+
+                # better error/warning handling, because Of Course I'm The One, you moron! I am The Son of GOD!! I was sent down by my father, to lead his flock to paradise... To atone for the sins of Adam and Eve in the garden! I am of one flesh with the divine, and of the lineage of Abraham! I will bring forth a new age, and a new covenant, shall be my legacy! I WILL VANQUISH, ALL EVIL, IN MY FATHER'S NAME! AMEN!!!
+                is_stat_line_type_a = any(stat in line_str for stat in ['samples processed', 'Mode-S message preambles received', 'CPU load:'])
+                is_stat_line_type_b = any(stat in line_str.lower() for stat in ['accepted with', 'cpr messages', 'local cpr attempts'])
                 
-                #skip separator lines shitted out by the thingy
-                if line_str.startswith('---'):
-                    header_lines += 1
-                    continue
-                
-                # FINALLY, we're in the aircraft data section after the header
-                if aircraft_section and header_lines >= 1:
-                    # Parse aircraft data line
-                    self._parse_aircraft_line(line_str)
+                # ONLY flag as error if it's not a statistical line AND contains an error keyword
+                if not is_stat_line_type_a and not is_stat_line_type_b and any(err in line_str.lower() for err in ['fail', 'fatal', 'error', 'cannot open', 'device not found']):
+                    print(f"\n!!! READSB ERROR: {line_str}")
                     
-            except Exception as e:
-                # Continue processing even if one line fails SOMEHOW
-                continue
-    
-    def _parse_aircraft_line(self, line):
-        #parse a single aircraft data line from readsb interactive output
+            except Empty:
+                time.sleep(0.1) # Wait if queue is empty
+            except Exception:
+                pass
+
+    #simple parse function to extract ICAO address
+    def _parse_raw_line(self, line):
         try:
-            # split it by spaces, but have fields that might have spaces
-            parts = line.split()
-            if len(parts) < 6:
+            # Regex to match the raw message format NOTE: this shit is so fucking confusing
+            match = re.match(r'\*([0-9a-fA-F]{14,28});', line)
+            if not match:
                 return
+
+            full_hex_payload = match.group(1)
+            icao_address = None
             
-            # NOTE: the format is typically: Hex Mode Sqwk Flight Alt Spd Hdg Lat Long Sig Msgs Ti/
-            # NOTE: look at me figuring out that i used all the wrong ones all this time:D
-            hex_code = parts[0]
+            #fallback parsing ICAO is the 3rd to 8th hex character of the message payload
+            # Made for DF17 (Extended Squitter... or sm shit) bc ads-b is dum
+            if len(full_hex_payload) >= 8:
+                icao_address = full_hex_payload[2:8].upper()
             
-            # Validate hex code (6 characters, hexadecimal)
-            if len(hex_code) != 6 or not all(c in '0123456789abcdefABCDEF' for c in hex_code):
-                return
-            
-            aircraft_info = {}
-            aircraft_info['hex'] = hex_code.upper()
-            
-            # Find the flight callsign - it's usually at position 3, but might be variable
-            flight_index = 3
-            if len(parts) > flight_index:
-                flight = parts[flight_index]
-                # flight callsign should be alphanumeric, if its not - fuck you
-                if (flight not in ['N/A', '---', '?'] and 
-                    not flight.replace('.', '').isdigit() and
-                    not flight.startswith('-')):
-                    aircraft_info['flight'] = flight
-            
-            # altitude is usually at position 4
-            if len(parts) > 4:
-                alt_str = parts[4]
-                if alt_str not in ['N/A', '---', '?'] and not alt_str.startswith('-'):
-                    try:
-                        alt = int(alt_str)
-                        aircraft_info['altitude'] = f"{alt} ft"
-                    except ValueError:
-                        pass
-            
-            # speed should go fifth
-            if len(parts) > 5:
-                speed_str = parts[5]
-                if speed_str not in ['N/A', '---', '?'] and not speed_str.startswith('-'):
-                    try:
-                        speed = int(speed_str)
-                        aircraft_info['speed'] = f"{speed} kts"
-                    except ValueError:
-                        pass
-            
-            # Heading should be sixth
-            if len(parts) > 6:
-                heading_str = parts[6]
-                if heading_str not in ['N/A', '---', '?'] and not heading_str.startswith('-'):
-                    try:
-                        heading = int(heading_str)
-                        aircraft_info['heading'] = f"{heading}°"
-                    except ValueError:
-                        pass
-            
-            # Update the timestamp
-            aircraft_info['last_seen'] = datetime.datetime.now().strftime("%H:%M:%S")
-            
-            #only store if we have at least the hex code(or else wth do we do with that:/)
-            if aircraft_info:
-                self.aircraft_data[hex_code.upper()] = aircraft_info
+            if icao_address and len(icao_address) == 6:
+                #add the aircraft data table with the hex code and current time
+                self.aircraft_data[icao_address] = {
+                    'hex': icao_address,
+                    'last_seen': datetime.datetime.now().strftime("%H:%M:%S")
+                }
                 
-        except Exception as e:
-            # Skip parsing errors (because fuck ads b, ancient ahh protocol)
+        except Exception:
             pass
     
+    # Removes aircraft from the list if they haven't been seen in the last 120 seconds
     def _cleanup_old_aircraft(self):
-        #remove aircrafts that haven't been seen in some time
         current_time = time.time()
-        # Clean up this shit every 30 seconds
+        
         if current_time - self.last_cleanup > 30:
             expired_hexes = []
-            for hex_code, aircraft in self.aircraft_data.items():
-                last_seen_str = aircraft.get('last_seen', '')
+            
+            for hex_code, aircraft in list(self.aircraft_data.items()):
+                last_seen_str = aircraft.get('last_seen')
+                if not last_seen_str:
+                    expired_hexes.append(hex_code)
+                    continue
+
                 try:
-                    #parse time in Hours:Minues:Seconds
                     last_seen_time = datetime.datetime.strptime(last_seen_str, "%H:%M:%S")
                     now = datetime.datetime.now()
-                    #create comparable datetime objects
+                    # handle time wrap around midnight by checking if last_seen is future
                     last_seen_dt = last_seen_time.replace(year=now.year, month=now.month, day=now.day)
+                    if last_seen_dt > now:
+                        last_seen_dt = last_seen_dt - datetime.timedelta(days=1)
+                        
                     time_diff = now - last_seen_dt
                     
-                    #remove any aircraft older than 2 minutes
-                    if time_diff.total_seconds() > 120:
+                    if time_diff.total_seconds() > 120: # 2 minutes timeout
                         expired_hexes.append(hex_code)
-                except:
-                    #remove the aircraft if the time thingy is fucked
+                except ValueError:
                     expired_hexes.append(hex_code)
-            
+
             for hex_code in expired_hexes:
-                if hex_code in self.aircraft_data:
-                    del self.aircraft_data[hex_code]
+                self.aircraft_data.pop(hex_code, None)
             
             self.last_cleanup = current_time
-    
+
+    #the main output display(raw or parsed)
     def view_aircraft(self):
-        #Displays current aircraft in a structured format(so pretty yet so ugly...) or raw output
         if not self.monitoring or not self.adsb_process:
-            print("ADS-B monitoring is not running!")
-            print("Start monitoring first using option 1.")
+            print("ADS-B monitoring is not running! Start monitoring first using option 1.")
             input("Press Enter to continue...")
             return
         
@@ -471,146 +435,109 @@ class ADSB:
             while True:
                 os.system('clear')
                 print("========================================")
-                print("         CURRENT AIRCRAFT - ADS-B")
+                print("        AIRCRAFT DATA - ADS-B")
                 print("========================================")
-                print(f"Last update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                print(f"Mode: {'RAW DATA (DEBUG)' if self.debug_mode else 'STRUCTURED TABLE'}")
-                print("="*60)
+                print(f"Last Update: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"Mode: {'RAW DATA (DEBUG)' if self.debug_mode else 'DECODED DATA'}")
+                print("="*50)
+                
+                #status output
+                if self.has_received_data:
+                    print("Monitoring is active: data (setup messages, raw input, or stats) is being received.")
+                else:
+                    print("Monitoring started, but no output data has been captured yet. Check HackRF connection and ensure readsb is running.")
+                print("="*50)
 
                 if self.debug_mode:
-                    # Debug Mode: Display raw output from the buffer
-                    print("--- RAW READSB OUTPUT (Latest 100 lines) ---")
+                    #raw data ou- okay, its literally said below, common now, you dont need this comment
+                    print("--- RAW READSB OUTPUT ---")
                     
-                    with self.raw_output_lock:
-                        # Display up to the last 100 lines
-                        for line in self.raw_output_buffer[-100:]:
+                    if self.raw_output_buffer:
+                        for line in self.raw_output_buffer[-50:]:
                             print(line)
-                        # Clear buffer regularly to prevent memory overload
-                        if len(self.raw_output_buffer) > 200: # Keep a buffer of 200, show 100
-                            self.raw_output_buffer = self.raw_output_buffer[-100:] 
-                    
-                    if not self.raw_output_buffer:
-                        print("No raw data received yet. Waiting for readsb output...")
+                    else:
+                        print("No raw data buffer available yet.")
                     
                 else:
-                    #normal mode - a table-ish structure
-                    # Clean up old aircraft before displaying
+                    # decoded ICAO view (Simple ICAO list)
                     self._cleanup_old_aircraft()
                     
-                    print(f"Aircraft detected: {len(self.aircraft_data)}")
-                    print("="*60)
+                    print(f"Aircraft tracks seen (Last 2 minutes): {len(self.aircraft_data)}")
+                    print("="*50)
                     
                     if not self.aircraft_data:
-                        print("No aircraft currently in range...")
-                        print("")
-                        print("Check RX LED on your hackrf, also make sure that your antenna supports the 1090 MHz frequency")
+                        print("No aircraft tracks currently active. The table view requires decoded Mode-S messages.")
                     else:
-                        # LIKE IT, i spent too much time making this somewhat nice looking D:
-                        print(f"{'Callsign':<10} {'Alt':<9} {'Speed':<8} {'Heading':<9} {'Last Seen':<9}")
-                        print("-" * 60)
                         
-                        # Sort aircraft by last seen (newest first)
+                        print(f"{'ICAO Hex':<10} {'Last Seen':<9}")
+                        print("-" * 19)
+                        
                         sorted_aircraft = sorted(self.aircraft_data.values(), 
                                                key=lambda x: x.get('last_seen', ''), 
                                                reverse=True)
                         
-                        for aircraft in sorted_aircraft[:30]:  # Show max 30 aircraft
-                            callsign = aircraft.get('flight', aircraft.get('hex', 'N/A'))
-                            altitude = aircraft.get('altitude', '---')
-                            speed = aircraft.get('speed', '---')
-                            heading = aircraft.get('heading', '---')
+                        for aircraft in sorted_aircraft[:30]:
+                            hex_code = aircraft.get('hex', '---')
                             last_seen = aircraft.get('last_seen', '---')
                             
-                            # Give the callsign israel men treatment if too long
-                            if len(callsign) > 10:
-                                callsign = callsign[:10]
-                            
-                            print(f"{callsign:<10} {altitude:<9} {speed:<8} {heading:<9} {last_seen:<9}")
+                            print(f"{hex_code:<10} {last_seen:<9}")
                         
                         if len(self.aircraft_data) > 30:
-                            print(f"... and {len(self.aircraft_data) - 30} more aircraft")
+                            print(f"... and {len(self.aircraft_data) - 30} more tracks")
                 
-                print("\n" + "="*60)
+                print("\n" + "="*50)
                 print("Press Ctrl+C to return to ADS-B menu")
-                print("Listening on 1090 MHz - Updates every 3 seconds")
-                print("Note: Monitoring continues running in background")
+                print("Monitoring continues running in background")
                 
-                #update every 3 seconds and expect user interrupt
                 try:
-                    time.sleep(3)
+                    time.sleep(3) # update interval
                 except KeyboardInterrupt:
-                    print("\nReturning to ADS-B menu...")
-                    print("ADS-B monitoring is still running in background!")
-                    print("Use option 3 to stop monitoring completely")
-                    time.sleep(3)  # Give the poor user time to read the message
+                    time.sleep(1)
                     break
                     
         except KeyboardInterrupt:
-            print("\nReturning to ADS-B menu...")
-            print("ADS-B monitoring is still running in background!")
-            print("Use option 3 to stop monitoring completely")
-            time.sleep(2)
+            time.sleep(1)
         except Exception as e:
-            print(f"Error displaying aircraft: {e}")
+            print(f"Error displaying output: {e}")
             input("Press Enter to continue...")
     
+    #stup readsb subprocess and cleanup
     def stop_adsb(self):
-        #Stop the fun - only when user explicitly chooses option 3
         if not self.monitoring and not self.adsb_process:
-            return  # Dont print anything if not running
+            return
         
         self.monitoring = False
         
         if self.adsb_process:
             print("Stopping ADS-B monitoring...")
-            print("Terminating readsb process...")
-            # Use os.killpg to kill the entire process group
+            
             try:
-                os.killpg(os.getpgid(self.adsb_process.pid), signal.SIGTERM)
+                # Terminate the process group
+                process_group_id = os.getpgid(self.adsb_process.pid)
+                os.killpg(process_group_id, signal.SIGTERM)
                 self.adsb_process.wait(timeout=5)
-                print("readsb process terminated successfully!")
-            except subprocess.TimeoutExpired:
-                print("Process not responding, forcing termination...")
-                os.killpg(os.getpgid(self.adsb_process.pid), signal.SIGKILL)
+            except Exception:
                 try:
+                    # Force kill if suckers resist
+                    os.killpg(process_group_id, signal.SIGKILL)
                     self.adsb_process.wait(timeout=2)
-                    print("readsb process force-terminated!")
-                except subprocess.TimeoutExpired:
-                    print("Could not terminate readsb process!")
-            except ProcessLookupError:
-                print("Process already terminated")
-            except AttributeError:
-                # Process might not have a pid yet
-                self.adsb_process.terminate()
-                try:
-                    self.adsb_process.wait(timeout=5)
                 except:
-                    self.adsb_process.kill()
-                    self.adsb_process.wait()
+                    pass
             
             self.adsb_process = None
         
-        # nuke any remaining readsb processes
-        print("Cleaning up any remaining readsb processes...")
-        result = subprocess.run(['pkill', '-f', 'readsb'], 
-                                 stdout=subprocess.DEVNULL, 
-                                 stderr=subprocess.DEVNULL)
+        # Fallback to kill any lingering readsb processes
+        subprocess.run(['pkill', '-f', 'readsb'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        if result.returncode == 0:
-            print("Cleaned up remaining readsb processes")
-        else:
-            print("No additional readsb processes found")
-        
-        # Clear aircraft data and raw buffer
+        # Reset the state
         self.aircraft_data = {}
-        with self.raw_output_lock:
-            self.raw_output_buffer = [] 
+        self.raw_output_buffer = [] 
         self.last_cleanup = time.time()
+        self.has_received_data = False
         
-        print("ADS-B monitoring stopped successfully!")
-        print("All aircraft data cleared")
         time.sleep(1)
-    
-    def __del__(self):
-        # additional cleanup when object is destroyed
-        self.stop_adsb()
+
+if __name__ == '__main__':
+    adsb_tool = ADSB()
+    adsb_tool.run()
+#NOTE: THIS SHIT WORKS!!!! I JUST TESTED IT AND THERE IS OUTPUT, HOLY FUCK I AM FREEEEEEEEEEEEEEEEEEEEEEEEEEEEE
